@@ -195,7 +195,7 @@ Thank you.
 
   Already on 0.7.5? Either upgrade to 0.7.6, or unblock yourself in place:
   ```bash
-  chmod +x "$(npm root -g)/@colbymchenry/codegraph/dist/bin/codegraph.js"
+  chmod +x "$(npm root -g)/@myersguo/codegraph/dist/bin/codegraph.js"
   ```
 
 [0.7.6]: https://github.com/colbymchenry/codegraph/releases/tag/v0.7.6

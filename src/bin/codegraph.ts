@@ -7,7 +7,7 @@
  * Usage:
  *   codegraph                    Run interactive installer (when no args)
  *   codegraph install            Run interactive installer
- *   codegraph init [path]        Initialize CodeGraph in a project
+ *   codegraph init [path]        Initialize CodeGraph (defaults to ~/.codegraph)
  *   codegraph uninit [path]      Remove CodeGraph from a project
  *   codegraph index [path]       Index all files in the project
  *   codegraph sync [path]        Sync changes since last index
@@ -21,6 +21,7 @@
 import { Command } from 'commander';
 import * as path from 'path';
 import * as fs from 'fs';
+import * as os from 'os';
 import { getCodeGraphDir, isInitialized } from '../directory';
 import { createShimmerProgress } from '../ui/shimmer-progress';
 import { getGlyphs } from '../ui/glyphs';
@@ -36,7 +37,7 @@ async function loadCodeGraph(): Promise<typeof import('../index')> {
     console.error(`\x1b[31m${getGlyphs().err}\x1b[0m Failed to load CodeGraph modules.`);
     console.error(`\n  Node: ${process.version}  Platform: ${process.platform} ${process.arch}`);
     console.error(`\n  Error: ${msg}`);
-    console.error('\n  Try reinstalling with: npm install -g @colbymchenry/codegraph\n');
+    console.error('\n  Try reinstalling with: npm install -g @myersguo/codegraph\n');
     process.exit(1);
   }
 }
@@ -162,6 +163,28 @@ function resolveProjectPath(pathArg?: string): string {
 
   // Not found - return original path (will fail later with helpful error)
   return absolutePath;
+}
+
+function resolveStorageRootFromCwd(): string | null {
+  return resolveProjectPath(process.cwd());
+}
+
+function resolveIndexTarget(pathArg?: string): { storagePath: string; sourcePath?: string } {
+  if (!pathArg) {
+    return { storagePath: resolveProjectPath() };
+  }
+
+  const absoluteArg = path.resolve(pathArg);
+  if (isInitialized(absoluteArg)) {
+    return { storagePath: resolveProjectPath(absoluteArg) };
+  }
+
+  const cwdStorage = resolveStorageRootFromCwd();
+  if (cwdStorage && isInitialized(cwdStorage)) {
+    return { storagePath: cwdStorage, sourcePath: absoluteArg };
+  }
+
+  return { storagePath: resolveProjectPath(absoluteArg) };
 }
 
 /**
@@ -397,7 +420,7 @@ program
   .option('-i, --index', 'Run initial indexing after initialization')
   .option('-v, --verbose', 'Show detailed worker lifecycle and memory info')
   .action(async (pathArg: string | undefined, options: { index?: boolean; verbose?: boolean }) => {
-    const projectPath = path.resolve(pathArg || process.cwd());
+    const projectPath = path.resolve(pathArg || os.homedir());
     const clack = await importESM('@clack/prompts');
 
     clack.intro('Initializing CodeGraph');
@@ -522,7 +545,7 @@ program
   .option('-q, --quiet', 'Suppress progress output')
   .option('-v, --verbose', 'Show detailed worker lifecycle and memory info')
   .action(async (pathArg: string | undefined, options: { force?: boolean; quiet?: boolean; verbose?: boolean }) => {
-    const projectPath = resolveProjectPath(pathArg);
+    const { storagePath: projectPath, sourcePath } = resolveIndexTarget(pathArg);
 
     try {
       if (!isInitialized(projectPath)) {
@@ -536,8 +559,10 @@ program
 
       if (options.quiet) {
         // Quiet mode: no UI, just run
-        if (options.force) cg.clear();
-        const result = await cg.indexAll();
+        if (options.force && !sourcePath) cg.clear();
+        const result = sourcePath
+          ? await cg.indexSourceRoot(sourcePath, { force: options.force })
+          : await cg.indexAll();
         if (!result.success) process.exit(1);
         cg.destroy();
         return;
@@ -546,22 +571,33 @@ program
       const clack = await importESM('@clack/prompts');
       clack.intro('Indexing project');
 
-      if (options.force) {
+      if (options.force && !sourcePath) {
         cg.clear();
         clack.log.info('Cleared existing index');
+      }
+      if (sourcePath) {
+        clack.log.info(`Storage: ${projectPath}`);
+        clack.log.info(`Source: ${sourcePath}`);
       }
 
       let result: IndexResult;
 
       if (options.verbose) {
-        result = await cg.indexAll({
+        result = sourcePath ? await cg.indexSourceRoot(sourcePath, {
+          onProgress: createVerboseProgress(),
+          verbose: true,
+          force: options.force,
+        }) : await cg.indexAll({
           onProgress: createVerboseProgress(),
           verbose: true,
         });
       } else {
         process.stdout.write(`${colors.dim}${getGlyphs().rail}${colors.reset}\n`);
         const progress = createShimmerProgress();
-        result = await cg.indexAll({
+        result = sourcePath ? await cg.indexSourceRoot(sourcePath, {
+          onProgress: progress.onProgress,
+          force: options.force,
+        }) : await cg.indexAll({
           onProgress: progress.onProgress,
         });
         await progress.stop();
@@ -589,7 +625,7 @@ program
   .description('Sync changes since last index')
   .option('-q, --quiet', 'Suppress output (for git hooks)')
   .action(async (pathArg: string | undefined, options: { quiet?: boolean }) => {
-    const projectPath = resolveProjectPath(pathArg);
+    const { storagePath: projectPath, sourcePath } = resolveIndexTarget(pathArg);
 
     try {
       if (!isInitialized(projectPath)) {
@@ -601,9 +637,12 @@ program
 
       const { default: CodeGraph } = await loadCodeGraph();
       const cg = await CodeGraph.open(projectPath);
+      const hasSourceRoots = cg.getSourceRoots().length > 0;
 
       if (options.quiet) {
-        await cg.sync();
+        if (sourcePath) await cg.syncSourceRoot(sourcePath);
+        else if (hasSourceRoots) await cg.syncAllSourceRoots();
+        else await cg.sync();
         cg.destroy();
         return;
       }
@@ -614,7 +653,11 @@ program
       process.stdout.write(`${colors.dim}${getGlyphs().rail}${colors.reset}\n`);
       const progress = createShimmerProgress();
 
-      const result = await cg.sync({
+      const result = sourcePath ? await cg.syncSourceRoot(sourcePath, {
+        onProgress: progress.onProgress,
+      }) : hasSourceRoots ? await cg.syncAllSourceRoots({
+        onProgress: progress.onProgress,
+      }) : await cg.sync({
         onProgress: progress.onProgress,
       });
 
@@ -651,7 +694,7 @@ program
   .description('Show index status and statistics')
   .option('-j, --json', 'Output as JSON')
   .action(async (pathArg: string | undefined, options: { json?: boolean }) => {
-    const projectPath = resolveProjectPath(pathArg);
+    const { storagePath: projectPath, sourcePath } = resolveIndexTarget(pathArg);
 
     try {
       if (!isInitialized(projectPath)) {
@@ -669,8 +712,13 @@ program
       const { default: CodeGraph } = await loadCodeGraph();
       const cg = await CodeGraph.open(projectPath);
       const stats = cg.getStats();
-      const changes = cg.getChangedFiles();
       const backend = cg.getBackend();
+      const sourceRoots = cg.getSourceRoots();
+      const changes = sourcePath
+        ? cg.getChangedFilesForSourceRoot(sourcePath)
+        : sourceRoots.length > 0
+          ? cg.getChangedFilesForAllSourceRoots()
+          : cg.getChangedFiles();
 
       // JSON output mode
       if (options.json) {
@@ -682,6 +730,7 @@ program
           edgeCount: stats.edgeCount,
           dbSizeBytes: stats.dbSizeBytes,
           backend,
+          sourceRoots,
           nodesByKind: stats.nodesByKind,
           languages: Object.entries(stats.filesByLanguage).filter(([, count]) => count > 0).map(([lang]) => lang),
           pendingChanges: {
@@ -698,7 +747,18 @@ program
 
       // Project info
       console.log(chalk.cyan('Project:'), projectPath);
+      if (sourcePath) {
+        console.log(chalk.cyan('Source:'), sourcePath);
+      }
       console.log();
+
+      if (!sourcePath && sourceRoots.length > 0) {
+        console.log(chalk.bold('Source Roots:'));
+        for (const root of sourceRoots) {
+          console.log(`  ${root.pathPrefix.padEnd(24)} ${root.path}`);
+        }
+        console.log();
+      }
 
       // Index stats
       console.log(chalk.bold('Index Statistics:'));
@@ -773,7 +833,7 @@ program
   .option('-k, --kind <kind>', 'Filter by node kind (function, class, etc.)')
   .option('-j, --json', 'Output as JSON')
   .action(async (search: string, options: { path?: string; limit?: string; kind?: string; json?: boolean }) => {
-    const projectPath = resolveProjectPath(options.path);
+    const { storagePath: projectPath, sourcePath } = resolveIndexTarget(options.path);
 
     try {
       if (!isInitialized(projectPath)) {
@@ -785,10 +845,16 @@ program
       const cg = await CodeGraph.open(projectPath);
 
       const limit = parseInt(options.limit || '10', 10);
-      const results = cg.searchNodes(search, {
+      let results = cg.searchNodes(search, {
         limit,
         kinds: options.kind ? [options.kind as any] : undefined,
       });
+      if (sourcePath) {
+        const root = cg.resolveSourceRoot(sourcePath);
+        if (root) {
+          results = results.filter((result) => result.node.filePath.startsWith(root.pathPrefix));
+        }
+      }
 
       if (options.json) {
         console.log(JSON.stringify(results, null, 2));
@@ -846,7 +912,7 @@ program
     metadata?: boolean;
     json?: boolean;
   }) => {
-    const projectPath = resolveProjectPath(options.path);
+    const { storagePath: projectPath, sourcePath } = resolveIndexTarget(options.path);
 
     try {
       if (!isInitialized(projectPath)) {
@@ -857,6 +923,12 @@ program
       const { default: CodeGraph } = await loadCodeGraph();
       const cg = await CodeGraph.open(projectPath);
       let files = cg.getFiles();
+      if (sourcePath) {
+        const root = cg.resolveSourceRoot(sourcePath);
+        if (root) {
+          files = files.filter((f) => f.path.startsWith(root.pathPrefix));
+        }
+      }
 
       if (files.length === 0) {
         info('No files indexed. Run "codegraph index" first.');
@@ -1049,7 +1121,7 @@ program
     code?: boolean;
     format?: string;
   }) => {
-    const projectPath = resolveProjectPath(options.path);
+    const { storagePath: projectPath, sourcePath } = resolveIndexTarget(options.path);
 
     try {
       if (!isInitialized(projectPath)) {
@@ -1060,7 +1132,10 @@ program
       const { default: CodeGraph } = await loadCodeGraph();
       const cg = await CodeGraph.open(projectPath);
 
-      const context = await cg.buildContext(task, {
+      const scopedTask = sourcePath && cg.resolveSourceRoot(sourcePath)
+        ? `${task} path:${cg.resolveSourceRoot(sourcePath)!.pathPrefix}`
+        : task;
+      const context = await cg.buildContext(scopedTask, {
         maxNodes: parseInt(options.maxNodes || '50', 10),
         maxCodeBlocks: parseInt(options.maxCode || '10', 10),
         includeCode: options.code !== false,
@@ -1177,7 +1252,7 @@ program
   .option('-j, --json', 'Output as JSON')
   .option('-q, --quiet', 'Only output file paths, no decoration')
   .action(async (fileArgs: string[], options: { path?: string; stdin?: boolean; depth?: string; filter?: string; json?: boolean; quiet?: boolean }) => {
-    const projectPath = resolveProjectPath(options.path);
+    const { storagePath: projectPath, sourcePath } = resolveIndexTarget(options.path);
 
     try {
       if (!isInitialized(projectPath)) {
@@ -1201,6 +1276,12 @@ program
 
       const { default: CodeGraph } = await loadCodeGraph();
       const cg = await CodeGraph.open(projectPath);
+      if (sourcePath) {
+        const root = cg.resolveSourceRoot(sourcePath);
+        if (root) {
+          changedFiles = changedFiles.map((file) => file.startsWith(root.pathPrefix) ? file : `${root.pathPrefix}${file.replace(/^\/+/, '')}`);
+        }
+      }
       const maxDepth = parseInt(options.depth || '5', 10);
 
       // Common test file patterns

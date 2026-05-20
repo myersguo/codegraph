@@ -22,6 +22,7 @@ import { detectFrameworks } from './frameworks';
 import { loadProjectAliases, type AliasMap } from './path-aliases';
 import { logDebug } from '../errors';
 import type { ReExport } from './types';
+import { stripPathPrefix } from '../source-roots';
 
 // Re-export types
 export * from './types';
@@ -119,6 +120,7 @@ const PASCAL_BUILT_INS = new Set([
 export class ReferenceResolver {
   private projectRoot: string;
   private queries: QueryBuilder;
+  private pathPrefix: string;
   private context: ResolutionContext;
   private frameworks: FrameworkResolver[] = [];
   private nodeCache: Map<string, Node[]> = new Map(); // per-file node cache (bounded)
@@ -136,10 +138,15 @@ export class ReferenceResolver {
   // resolver's lifetime; callers re-create the resolver if config changes.
   private projectAliases: AliasMap | null | undefined = undefined;
 
-  constructor(projectRoot: string, queries: QueryBuilder) {
+  constructor(projectRoot: string, queries: QueryBuilder, options: { pathPrefix?: string } = {}) {
     this.projectRoot = projectRoot;
     this.queries = queries;
+    this.pathPrefix = options.pathPrefix ?? '';
     this.context = this.createContext();
+  }
+
+  private toSourcePath(filePath: string): string | null {
+    return stripPathPrefix(this.pathPrefix, filePath);
   }
 
   /**
@@ -160,7 +167,11 @@ export class ReferenceResolver {
     if (this.cachesWarmed) return;
 
     // Only cache the set of known file paths (lightweight string set)
-    this.knownFiles = new Set(this.queries.getAllFilePaths());
+    this.knownFiles = new Set(
+      this.pathPrefix
+        ? this.queries.getAllFilePathsByPrefix(this.pathPrefix)
+        : this.queries.getAllFilePaths()
+    );
 
     // Cache all distinct symbol names for fast pre-filtering (just strings, not full nodes)
     this.knownNames = new Set(this.queries.getAllNodeNames());
@@ -199,7 +210,9 @@ export class ReferenceResolver {
       getNodesByName: (name: string) => {
         const cached = this.nameCache.get(name);
         if (cached !== undefined) return cached;
-        const result = this.queries.getNodesByName(name);
+        const result = this.pathPrefix
+          ? this.queries.getNodesByNameInPathPrefix(name, this.pathPrefix)
+          : this.queries.getNodesByName(name);
         this.nameCache.set(name, result);
         return result;
       },
@@ -207,13 +220,17 @@ export class ReferenceResolver {
       getNodesByQualifiedName: (qualifiedName: string) => {
         const cached = this.qualifiedNameCache.get(qualifiedName);
         if (cached !== undefined) return cached;
-        const result = this.queries.getNodesByQualifiedNameExact(qualifiedName);
+        const result = this.pathPrefix
+          ? this.queries.getNodesByQualifiedNameExactInPathPrefix(qualifiedName, this.pathPrefix)
+          : this.queries.getNodesByQualifiedNameExact(qualifiedName);
         this.qualifiedNameCache.set(qualifiedName, result);
         return result;
       },
 
       getNodesByKind: (kind: Node['kind']) => {
-        return this.queries.getNodesByKind(kind);
+        return this.pathPrefix
+          ? this.queries.getNodesByKindInPathPrefix(kind, this.pathPrefix)
+          : this.queries.getNodesByKind(kind);
       },
 
       fileExists: (filePath: string) => {
@@ -225,7 +242,9 @@ export class ReferenceResolver {
           }
         }
         // Fall back to filesystem for files not yet indexed
-        const fullPath = path.join(this.projectRoot, filePath);
+        const sourcePath = this.toSourcePath(filePath);
+        if (sourcePath === null) return false;
+        const fullPath = path.join(this.projectRoot, sourcePath);
         try {
           return fs.existsSync(fullPath);
         } catch (error) {
@@ -239,7 +258,12 @@ export class ReferenceResolver {
           return this.fileCache.get(filePath)!;
         }
 
-        const fullPath = path.join(this.projectRoot, filePath);
+        const sourcePath = this.toSourcePath(filePath);
+        if (sourcePath === null) {
+          this.fileCache.set(filePath, null);
+          return null;
+        }
+        const fullPath = path.join(this.projectRoot, sourcePath);
         try {
           const content = fs.readFileSync(fullPath, 'utf-8');
           this.fileCache.set(filePath, content);
@@ -254,13 +278,15 @@ export class ReferenceResolver {
       getProjectRoot: () => this.projectRoot,
 
       getAllFiles: () => {
-        return this.queries.getAllFilePaths();
+        return this.pathPrefix
+          ? this.queries.getAllFilePathsByPrefix(this.pathPrefix)
+          : this.queries.getAllFilePaths();
       },
 
       listDirectories: (relativePath: string) => {
         const target = relativePath === '.' || relativePath === ''
           ? this.projectRoot
-          : path.join(this.projectRoot, relativePath);
+          : path.join(this.projectRoot, stripPathPrefix(this.pathPrefix, relativePath) ?? relativePath);
         try {
           return fs
             .readdirSync(target, { withFileTypes: true })
@@ -278,7 +304,9 @@ export class ReferenceResolver {
       getNodesByLowerName: (lowerName: string) => {
         const cached = this.lowerNameCache.get(lowerName);
         if (cached !== undefined) return cached;
-        const result = this.queries.getNodesByLowerName(lowerName);
+        const result = this.pathPrefix
+          ? this.queries.getNodesByLowerNameInPathPrefix(lowerName, this.pathPrefix)
+          : this.queries.getNodesByLowerName(lowerName);
         this.lowerNameCache.set(lowerName, result);
         return result;
       },
@@ -761,8 +789,12 @@ export class ReferenceResolver {
 /**
  * Create a reference resolver instance
  */
-export function createResolver(projectRoot: string, queries: QueryBuilder): ReferenceResolver {
-  const resolver = new ReferenceResolver(projectRoot, queries);
+export function createResolver(
+  projectRoot: string,
+  queries: QueryBuilder,
+  options: { pathPrefix?: string } = {}
+): ReferenceResolver {
+  const resolver = new ReferenceResolver(projectRoot, queries, options);
   resolver.initialize();
   return resolver;
 }

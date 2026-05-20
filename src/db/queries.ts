@@ -16,6 +16,7 @@ import {
   GraphStats,
   SearchOptions,
   SearchResult,
+  SourceRoot,
 } from '../types';
 import { safeJsonParse } from '../utils';
 import { kindBonus, nameMatchBonus, scorePathRelevance } from '../search/query-utils';
@@ -81,6 +82,14 @@ interface UnresolvedRefRow {
   language: string;
 }
 
+interface SourceRootRow {
+  id: string;
+  path: string;
+  name: string;
+  path_prefix: string;
+  indexed_at: number;
+}
+
 /**
  * Convert database row to Node object
  */
@@ -140,6 +149,16 @@ function rowToFileRecord(row: FileRow): FileRecord {
   };
 }
 
+function rowToSourceRoot(row: SourceRootRow): SourceRoot {
+  return {
+    id: row.id,
+    path: row.path,
+    name: row.name,
+    pathPrefix: row.path_prefix,
+    indexedAt: row.indexed_at,
+  };
+}
+
 /**
  * Query builder for the knowledge graph database
  */
@@ -180,6 +199,10 @@ export class QueryBuilder {
     getUnresolvedBatch?: SqliteStatement;
     getAllFilePaths?: SqliteStatement;
     getAllNodeNames?: SqliteStatement;
+    upsertSourceRoot?: SqliteStatement;
+    getSourceRootByPath?: SqliteStatement;
+    getSourceRootById?: SqliteStatement;
+    getAllSourceRoots?: SqliteStatement;
   } = {};
 
   constructor(db: SqliteDatabase) {
@@ -445,6 +468,16 @@ export class QueryBuilder {
   }
 
   /**
+   * Get nodes by exact name match scoped to an indexed path prefix.
+   */
+  getNodesByNameInPathPrefix(name: string, pathPrefix: string): Node[] {
+    const rows = this.db
+      .prepare('SELECT * FROM nodes WHERE name = ? AND file_path LIKE ?')
+      .all(name, `${pathPrefix}%`) as NodeRow[];
+    return rows.map(rowToNode);
+  }
+
+  /**
    * Get nodes by exact qualified name match (uses idx_nodes_qualified_name index)
    */
   getNodesByQualifiedNameExact(qualifiedName: string): Node[] {
@@ -454,6 +487,13 @@ export class QueryBuilder {
       );
     }
     const rows = this.stmts.getNodesByQualifiedNameExact.all(qualifiedName) as NodeRow[];
+    return rows.map(rowToNode);
+  }
+
+  getNodesByQualifiedNameExactInPathPrefix(qualifiedName: string, pathPrefix: string): Node[] {
+    const rows = this.db
+      .prepare('SELECT * FROM nodes WHERE qualified_name = ? AND file_path LIKE ?')
+      .all(qualifiedName, `${pathPrefix}%`) as NodeRow[];
     return rows.map(rowToNode);
   }
 
@@ -467,6 +507,20 @@ export class QueryBuilder {
       );
     }
     const rows = this.stmts.getNodesByLowerName.all(lowerName) as NodeRow[];
+    return rows.map(rowToNode);
+  }
+
+  getNodesByLowerNameInPathPrefix(lowerName: string, pathPrefix: string): Node[] {
+    const rows = this.db
+      .prepare('SELECT * FROM nodes WHERE lower(name) = ? AND file_path LIKE ?')
+      .all(lowerName, `${pathPrefix}%`) as NodeRow[];
+    return rows.map(rowToNode);
+  }
+
+  getNodesByKindInPathPrefix(kind: NodeKind, pathPrefix: string): Node[] {
+    const rows = this.db
+      .prepare('SELECT * FROM nodes WHERE kind = ? AND file_path LIKE ?')
+      .all(kind, `${pathPrefix}%`) as NodeRow[];
     return rows.map(rowToNode);
   }
 
@@ -1137,6 +1191,13 @@ export class QueryBuilder {
     return rows.map(rowToFileRecord);
   }
 
+  getFilesByPathPrefix(pathPrefix: string): FileRecord[] {
+    const rows = this.db
+      .prepare('SELECT * FROM files WHERE path LIKE ? ORDER BY path')
+      .all(`${pathPrefix}%`) as FileRow[];
+    return rows.map(rowToFileRecord);
+  }
+
   /**
    * Get files that need re-indexing (hash changed)
    */
@@ -1286,6 +1347,13 @@ export class QueryBuilder {
     return rows.map((r) => r.path);
   }
 
+  getAllFilePathsByPrefix(pathPrefix: string): string[] {
+    const rows = this.db
+      .prepare('SELECT path FROM files WHERE path LIKE ? ORDER BY path')
+      .all(`${pathPrefix}%`) as Array<{ path: string }>;
+    return rows.map((r) => r.path);
+  }
+
   /**
    * Get all distinct node names (lightweight — just name strings for pre-filtering)
    */
@@ -1308,6 +1376,23 @@ export class QueryBuilder {
     const rows = this.db
       .prepare(`SELECT * FROM unresolved_refs WHERE file_path IN (${placeholders})`)
       .all(...filePaths) as UnresolvedRefRow[];
+
+    return rows.map((row) => ({
+      fromNodeId: row.from_node_id,
+      referenceName: row.reference_name,
+      referenceKind: row.reference_kind as EdgeKind,
+      line: row.line,
+      column: row.col,
+      candidates: row.candidates ? safeJsonParse(row.candidates, undefined) : undefined,
+      filePath: row.file_path,
+      language: row.language as Language,
+    }));
+  }
+
+  getUnresolvedReferencesByPathPrefix(pathPrefix: string): UnresolvedReference[] {
+    const rows = this.db
+      .prepare('SELECT * FROM unresolved_refs WHERE file_path LIKE ?')
+      .all(`${pathPrefix}%`) as UnresolvedRefRow[];
 
     return rows.map((row) => ({
       fromNodeId: row.from_node_id,
@@ -1427,6 +1512,60 @@ export class QueryBuilder {
     ).run(key, value, Date.now());
   }
 
+  // ===========================================================================
+  // Source Roots
+  // ===========================================================================
+
+  upsertSourceRoot(root: SourceRoot): void {
+    if (!this.stmts.upsertSourceRoot) {
+      this.stmts.upsertSourceRoot = this.db.prepare(`
+        INSERT INTO source_roots (id, path, name, path_prefix, indexed_at)
+        VALUES (@id, @path, @name, @pathPrefix, @indexedAt)
+        ON CONFLICT(path) DO UPDATE SET
+          id = excluded.id,
+          name = excluded.name,
+          path_prefix = excluded.path_prefix,
+          indexed_at = excluded.indexed_at
+      `);
+    }
+
+    this.stmts.upsertSourceRoot.run(root);
+  }
+
+  getSourceRootByPath(sourcePath: string): SourceRoot | null {
+    if (!this.stmts.getSourceRootByPath) {
+      this.stmts.getSourceRootByPath = this.db.prepare('SELECT * FROM source_roots WHERE path = ?');
+    }
+    const row = this.stmts.getSourceRootByPath.get(sourcePath) as SourceRootRow | undefined;
+    return row ? rowToSourceRoot(row) : null;
+  }
+
+  getSourceRootById(id: string): SourceRoot | null {
+    if (!this.stmts.getSourceRootById) {
+      this.stmts.getSourceRootById = this.db.prepare('SELECT * FROM source_roots WHERE id = ?');
+    }
+    const row = this.stmts.getSourceRootById.get(id) as SourceRootRow | undefined;
+    return row ? rowToSourceRoot(row) : null;
+  }
+
+  getAllSourceRoots(): SourceRoot[] {
+    if (!this.stmts.getAllSourceRoots) {
+      this.stmts.getAllSourceRoots = this.db.prepare('SELECT * FROM source_roots ORDER BY name, path');
+    }
+    const rows = this.stmts.getAllSourceRoots.all() as SourceRootRow[];
+    return rows.map(rowToSourceRoot);
+  }
+
+  deleteByPathPrefix(pathPrefix: string): void {
+    this.nodeCache.clear();
+    this.db.transaction(() => {
+      this.db.prepare('DELETE FROM unresolved_refs WHERE file_path LIKE ?').run(`${pathPrefix}%`);
+      this.db.prepare('DELETE FROM edges WHERE source IN (SELECT id FROM nodes WHERE file_path LIKE ?) OR target IN (SELECT id FROM nodes WHERE file_path LIKE ?)').run(`${pathPrefix}%`, `${pathPrefix}%`);
+      this.db.prepare('DELETE FROM nodes WHERE file_path LIKE ?').run(`${pathPrefix}%`);
+      this.db.prepare('DELETE FROM files WHERE path LIKE ?').run(`${pathPrefix}%`);
+    })();
+  }
+
   /**
    * Get all metadata as a key-value record
    */
@@ -1449,6 +1588,7 @@ export class QueryBuilder {
       this.db.exec('DELETE FROM edges');
       this.db.exec('DELETE FROM nodes');
       this.db.exec('DELETE FROM files');
+      this.db.exec('DELETE FROM source_roots');
     })();
   }
 }

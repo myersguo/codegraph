@@ -9,7 +9,7 @@ import { SqliteDatabase } from './sqlite-adapter';
 /**
  * Current schema version
  */
-export const CURRENT_SCHEMA_VERSION = 4;
+export const CURRENT_SCHEMA_VERSION = 5;
 
 /**
  * Migration definition
@@ -62,6 +62,22 @@ const migrations: Migration[] = [
       db.exec(`
         DROP INDEX IF EXISTS idx_edges_source;
         DROP INDEX IF EXISTS idx_edges_target;
+      `);
+    },
+  },
+  {
+    version: 5,
+    description: 'Add source roots registry for global multi-repository indexes',
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS source_roots (
+          id TEXT PRIMARY KEY,
+          path TEXT NOT NULL UNIQUE,
+          name TEXT NOT NULL,
+          path_prefix TEXT NOT NULL UNIQUE,
+          indexed_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_source_roots_path ON source_roots(path);
       `);
     },
   },

@@ -24,6 +24,7 @@ import { validatePathWithinRoot, normalizePath } from '../utils';
 import picomatch from 'picomatch';
 import { detectFrameworks } from '../resolution/frameworks';
 import type { ResolutionContext } from '../resolution/types';
+import { namespacePath, stripPathPrefix } from '../source-roots';
 
 /**
  * Number of files to read in parallel during indexing.
@@ -413,6 +414,7 @@ export class ExtractionOrchestrator {
   private rootDir: string;
   private config: CodeGraphConfig;
   private queries: QueryBuilder;
+  private pathPrefix: string;
   /**
    * Names of frameworks detected for this project, populated by indexAll().
    * Passed to extractFromSource so framework-specific extractors (route nodes,
@@ -421,10 +423,54 @@ export class ExtractionOrchestrator {
    */
   private detectedFrameworkNames: string[] | null = null;
 
-  constructor(rootDir: string, config: CodeGraphConfig, queries: QueryBuilder) {
+  constructor(rootDir: string, config: CodeGraphConfig, queries: QueryBuilder, pathPrefix = '') {
     this.rootDir = rootDir;
     this.config = config;
     this.queries = queries;
+    this.pathPrefix = pathPrefix;
+  }
+
+  private toDbPath(relativePath: string): string {
+    return namespacePath(this.pathPrefix, relativePath);
+  }
+
+  private toSourcePath(dbPath: string): string | null {
+    return stripPathPrefix(this.pathPrefix, dbPath);
+  }
+
+  private namespaceExtractionResult(result: ExtractionResult, sourceFilePath: string): ExtractionResult {
+    const dbFilePath = this.toDbPath(sourceFilePath);
+    const idMap = new Map<string, string>();
+
+    const nodes = result.nodes.map((node) => {
+      const next = {
+        ...node,
+        id: node.id.replace(sourceFilePath, dbFilePath),
+        qualifiedName: node.qualifiedName.replace(sourceFilePath, dbFilePath),
+        filePath: dbFilePath,
+      };
+      idMap.set(node.id, next.id);
+      return next;
+    });
+
+    return {
+      ...result,
+      nodes,
+      edges: result.edges.map((edge) => ({
+        ...edge,
+        source: idMap.get(edge.source) ?? edge.source,
+        target: idMap.get(edge.target) ?? edge.target,
+      })),
+      unresolvedReferences: result.unresolvedReferences.map((ref) => ({
+        ...ref,
+        fromNodeId: idMap.get(ref.fromNodeId) ?? ref.fromNodeId,
+        filePath: ref.filePath ? this.toDbPath(ref.filePath) : dbFilePath,
+      })),
+      errors: result.errors.map((err) => ({
+        ...err,
+        filePath: err.filePath ? this.toDbPath(err.filePath) : err.filePath,
+      })),
+    };
   }
 
   /**
@@ -1134,22 +1180,24 @@ export class ExtractionOrchestrator {
     result: ExtractionResult
   ): void {
     const contentHash = hashContent(content);
+    const dbFilePath = this.toDbPath(filePath);
+    const dbResult = this.namespaceExtractionResult(result, filePath);
 
     // Check if file already exists and hasn't changed
-    const existingFile = this.queries.getFileByPath(filePath);
+    const existingFile = this.queries.getFileByPath(dbFilePath);
     if (existingFile && existingFile.contentHash === contentHash) {
       return; // No changes
     }
 
     // Delete existing data for this file
     if (existingFile) {
-      this.queries.deleteFile(filePath);
+      this.queries.deleteFile(dbFilePath);
     }
 
     // Filter out nodes with missing required fields before insertion.
     // This prevents FK violations when edges reference nodes that would
     // be silently skipped by insertNode() (see issue #42).
-    const validNodes = result.nodes.filter((n) => n.id && n.kind && n.name && n.filePath && n.language);
+    const validNodes = dbResult.nodes.filter((n) => n.id && n.kind && n.name && n.filePath && n.language);
 
     // Insert nodes
     if (validNodes.length > 0) {
@@ -1157,9 +1205,9 @@ export class ExtractionOrchestrator {
     }
 
     // Filter edges to only reference nodes that were actually inserted
-    if (result.edges.length > 0) {
+    if (dbResult.edges.length > 0) {
       const insertedIds = new Set(validNodes.map((n) => n.id));
-      const validEdges = result.edges.filter(
+      const validEdges = dbResult.edges.filter(
         (e) => insertedIds.has(e.source) && insertedIds.has(e.target)
       );
       if (validEdges.length > 0) {
@@ -1168,13 +1216,13 @@ export class ExtractionOrchestrator {
     }
 
     // Insert unresolved references in batch with denormalized filePath/language
-    if (result.unresolvedReferences.length > 0) {
+    if (dbResult.unresolvedReferences.length > 0) {
       const insertedIds = new Set(validNodes.map((n) => n.id));
-      const refsWithContext = result.unresolvedReferences
+      const refsWithContext = dbResult.unresolvedReferences
         .filter((ref) => insertedIds.has(ref.fromNodeId))
         .map((ref) => ({
           ...ref,
-          filePath: ref.filePath ?? filePath,
+          filePath: ref.filePath ?? dbFilePath,
           language: ref.language ?? language,
         }));
       if (refsWithContext.length > 0) {
@@ -1184,14 +1232,14 @@ export class ExtractionOrchestrator {
 
     // Insert file record
     const fileRecord: FileRecord = {
-      path: filePath,
+      path: dbFilePath,
       contentHash,
       language,
       size: stats.size,
       modifiedAt: stats.mtimeMs,
       indexedAt: Date.now(),
-      nodeCount: result.nodes.length,
-      errors: result.errors.length > 0 ? result.errors : undefined,
+      nodeCount: dbResult.nodes.length,
+      errors: dbResult.errors.length > 0 ? dbResult.errors : undefined,
     };
     this.queries.upsertFile(fileRecord);
   }
@@ -1226,9 +1274,10 @@ export class ExtractionOrchestrator {
 
       // Handle deleted files
       for (const filePath of gitChanges.deleted) {
-        const tracked = this.queries.getFileByPath(filePath);
+        const dbFilePath = this.toDbPath(filePath);
+        const tracked = this.queries.getFileByPath(dbFilePath);
         if (tracked) {
-          this.queries.deleteFile(filePath);
+          this.queries.deleteFile(dbFilePath);
           filesRemoved++;
         }
       }
@@ -1245,15 +1294,16 @@ export class ExtractionOrchestrator {
         }
 
         const contentHash = hashContent(content);
-        const tracked = this.queries.getFileByPath(filePath);
+        const dbFilePath = this.toDbPath(filePath);
+        const tracked = this.queries.getFileByPath(dbFilePath);
 
         if (!tracked) {
           filesToIndex.push(filePath);
-          changedFilePaths.push(filePath);
+          changedFilePaths.push(dbFilePath);
           filesAdded++;
         } else if (tracked.contentHash !== contentHash) {
           filesToIndex.push(filePath);
-          changedFilePaths.push(filePath);
+          changedFilePaths.push(dbFilePath);
           filesModified++;
         }
       }
@@ -1261,7 +1311,7 @@ export class ExtractionOrchestrator {
       // Handle added (untracked) files
       for (const filePath of gitChanges.added) {
         filesToIndex.push(filePath);
-        changedFilePaths.push(filePath);
+        changedFilePaths.push(this.toDbPath(filePath));
         filesAdded++;
       }
     } else {
@@ -1270,15 +1320,21 @@ export class ExtractionOrchestrator {
       filesChecked = currentFiles.size;
 
       // Build Map for O(1) lookups instead of .find() per file
-      const trackedFiles = this.queries.getAllFiles();
+      const trackedFiles = this.pathPrefix
+        ? this.queries.getFilesByPathPrefix(this.pathPrefix)
+        : this.queries.getAllFiles();
       const trackedMap = new Map<string, FileRecord>();
       for (const f of trackedFiles) {
-        trackedMap.set(f.path, f);
+        const sourcePath = this.toSourcePath(f.path);
+        if (sourcePath !== null) {
+          trackedMap.set(sourcePath, f);
+        }
       }
 
       // Find files to remove (in DB but not on disk)
       for (const tracked of trackedFiles) {
-        if (!currentFiles.has(tracked.path)) {
+        const trackedSourcePath = this.toSourcePath(tracked.path);
+        if (trackedSourcePath !== null && !currentFiles.has(trackedSourcePath)) {
           this.queries.deleteFile(tracked.path);
           filesRemoved++;
         }
@@ -1300,11 +1356,11 @@ export class ExtractionOrchestrator {
 
         if (!tracked) {
           filesToIndex.push(filePath);
-          changedFilePaths.push(filePath);
+          changedFilePaths.push(this.toDbPath(filePath));
           filesAdded++;
         } else if (tracked.contentHash !== contentHash) {
           filesToIndex.push(filePath);
-          changedFilePaths.push(filePath);
+          changedFilePaths.push(this.toDbPath(filePath));
           filesModified++;
         }
       }
@@ -1361,9 +1417,9 @@ export class ExtractionOrchestrator {
 
       // Deleted files — only report if tracked in DB
       for (const filePath of gitChanges.deleted) {
-        const tracked = this.queries.getFileByPath(filePath);
+        const tracked = this.queries.getFileByPath(this.toDbPath(filePath));
         if (tracked) {
-          removed.push(filePath);
+          removed.push(this.toDbPath(filePath));
         }
       }
 
@@ -1379,18 +1435,18 @@ export class ExtractionOrchestrator {
         }
 
         const contentHash = hashContent(content);
-        const tracked = this.queries.getFileByPath(filePath);
+        const tracked = this.queries.getFileByPath(this.toDbPath(filePath));
 
         if (!tracked) {
-          added.push(filePath);
+          added.push(this.toDbPath(filePath));
         } else if (tracked.contentHash !== contentHash) {
-          modified.push(filePath);
+          modified.push(this.toDbPath(filePath));
         }
       }
 
       // Added (untracked) files
       for (const filePath of gitChanges.added) {
-        added.push(filePath);
+        added.push(this.toDbPath(filePath));
       }
 
       return { added, modified, removed };
@@ -1398,12 +1454,17 @@ export class ExtractionOrchestrator {
 
     // === Fallback: full scan (non-git project or git failure) ===
     const currentFiles = new Set(scanDirectory(this.rootDir, this.config));
-    const trackedFiles = this.queries.getAllFiles();
+    const trackedFiles = this.pathPrefix
+      ? this.queries.getFilesByPathPrefix(this.pathPrefix)
+      : this.queries.getAllFiles();
 
     // Build Map for O(1) lookups
     const trackedMap = new Map<string, FileRecord>();
     for (const f of trackedFiles) {
-      trackedMap.set(f.path, f);
+      const sourcePath = this.toSourcePath(f.path);
+      if (sourcePath !== null) {
+        trackedMap.set(sourcePath, f);
+      }
     }
 
     const added: string[] = [];
@@ -1412,7 +1473,8 @@ export class ExtractionOrchestrator {
 
     // Find removed files
     for (const tracked of trackedFiles) {
-      if (!currentFiles.has(tracked.path)) {
+      const trackedSourcePath = this.toSourcePath(tracked.path);
+      if (trackedSourcePath !== null && !currentFiles.has(trackedSourcePath)) {
         removed.push(tracked.path);
       }
     }
@@ -1432,9 +1494,9 @@ export class ExtractionOrchestrator {
       const tracked = trackedMap.get(filePath);
 
       if (!tracked) {
-        added.push(filePath);
+        added.push(this.toDbPath(filePath));
       } else if (tracked.contentHash !== contentHash) {
-        modified.push(filePath);
+        modified.push(this.toDbPath(filePath));
       }
     }
 

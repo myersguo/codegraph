@@ -182,15 +182,18 @@ export class ContextBuilder {
   private projectRoot: string;
   private queries: QueryBuilder;
   private traverser: GraphTraverser;
+  private resolveFilePath: (filePath: string) => string | null;
 
   constructor(
     projectRoot: string,
     queries: QueryBuilder,
-    traverser: GraphTraverser
+    traverser: GraphTraverser,
+    resolveFilePath?: (filePath: string) => string | null
   ) {
     this.projectRoot = projectRoot;
     this.queries = queries;
     this.traverser = traverser;
+    this.resolveFilePath = resolveFilePath ?? ((filePath) => validatePathWithinRoot(this.projectRoot, filePath));
   }
 
   /**
@@ -931,7 +934,7 @@ export class ContextBuilder {
    * Extract code from a node's source file
    */
   private async extractNodeCode(node: Node): Promise<string | null> {
-    const filePath = validatePathWithinRoot(this.projectRoot, node.filePath);
+    const filePath = this.resolveFilePath(node.filePath);
 
     if (!filePath || !fs.existsSync(filePath)) {
       return null;
@@ -1125,9 +1128,10 @@ export class ContextBuilder {
 export function createContextBuilder(
   projectRoot: string,
   queries: QueryBuilder,
-  traverser: GraphTraverser
+  traverser: GraphTraverser,
+  resolveFilePath?: (filePath: string) => string | null
 ): ContextBuilder {
-  return new ContextBuilder(projectRoot, queries, traverser);
+  return new ContextBuilder(projectRoot, queries, traverser, resolveFilePath);
 }
 
 // Re-export formatter

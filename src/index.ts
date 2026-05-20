@@ -6,6 +6,7 @@
  */
 
 import * as path from 'path';
+import * as fs from 'fs';
 import {
   CodeGraphConfig,
   Node,
@@ -22,6 +23,7 @@ import {
   TaskContext,
   BuildContextOptions,
   FindRelevantContextOptions,
+  SourceRoot,
 } from './types';
 import { DatabaseConnection, getDatabasePath } from './db';
 import { QueryBuilder } from './db/queries';
@@ -49,6 +51,7 @@ import { GraphTraverser, GraphQueryManager } from './graph';
 import { ContextBuilder, createContextBuilder } from './context';
 import { Mutex, FileLock } from './utils';
 import { FileWatcher, WatchOptions } from './sync';
+import { createSourceRoot, stripPathPrefix } from './source-roots';
 
 // Re-export types for consumers
 export * from './types';
@@ -79,6 +82,7 @@ export {
 } from './errors';
 export { Mutex, FileLock, processInBatches, debounce, throttle, MemoryMonitor } from './utils';
 export { FileWatcher, WatchOptions } from './sync';
+export { createSourceRoot, createSourceRootId, namespacePath, stripPathPrefix } from './source-roots';
 export { MCPServer } from './mcp';
 
 /**
@@ -130,6 +134,7 @@ export class CodeGraph {
   private queries: QueryBuilder;
   private config: CodeGraphConfig;
   private projectRoot: string;
+  private pathPrefix: string;
   private orchestrator: ExtractionOrchestrator;
   private resolver: ReferenceResolver;
   private graphManager: GraphQueryManager;
@@ -149,24 +154,43 @@ export class CodeGraph {
     db: DatabaseConnection,
     queries: QueryBuilder,
     config: CodeGraphConfig,
-    projectRoot: string
+    projectRoot: string,
+    pathPrefix = ''
   ) {
     this.db = db;
     this.queries = queries;
     this.config = config;
     this.projectRoot = projectRoot;
+    this.pathPrefix = pathPrefix;
     this.fileLock = new FileLock(
       path.join(projectRoot, '.codegraph', 'codegraph.lock')
     );
-    this.orchestrator = new ExtractionOrchestrator(projectRoot, config, queries);
-    this.resolver = createResolver(projectRoot, queries);
+    this.orchestrator = new ExtractionOrchestrator(projectRoot, config, queries, pathPrefix);
+    this.resolver = createResolver(projectRoot, queries, { pathPrefix });
     this.graphManager = new GraphQueryManager(queries);
     this.traverser = new GraphTraverser(queries);
     this.contextBuilder = createContextBuilder(
       projectRoot,
       queries,
-      this.traverser
+      this.traverser,
+      (filePath) => this.resolveIndexedFilePath(filePath)
     );
+  }
+
+  private resolveIndexedFilePath(filePath: string): string | null {
+    const direct = path.resolve(this.projectRoot, filePath);
+    if ((direct.startsWith(this.projectRoot + path.sep) || direct === this.projectRoot) && fs.existsSync(direct)) {
+      return direct;
+    }
+
+    for (const root of this.queries.getAllSourceRoots()) {
+      const relative = stripPathPrefix(root.pathPrefix, filePath);
+      if (relative !== null) {
+        return path.join(root.path, relative);
+      }
+    }
+
+    return null;
   }
 
   // ===========================================================================
@@ -351,9 +375,10 @@ export class CodeGraph {
     this.orchestrator = new ExtractionOrchestrator(
       this.projectRoot,
       this.config,
-      this.queries
+      this.queries,
+      this.pathPrefix
     );
-    this.resolver = createResolver(this.projectRoot, this.queries);
+    this.resolver = createResolver(this.projectRoot, this.queries, { pathPrefix: this.pathPrefix });
   }
 
   /**
@@ -402,6 +427,42 @@ export class CodeGraph {
           });
         }
 
+        return result;
+      } finally {
+        this.fileLock.release();
+      }
+    });
+  }
+
+  /**
+   * Register and index a source directory into this database. Used by global
+   * workspaces where the DB lives outside the repository being indexed.
+   */
+  async indexSourceRoot(sourceRootPath: string, options: IndexOptions & { force?: boolean } = {}): Promise<IndexResult> {
+    const root = this.registerSourceRoot(sourceRootPath);
+    const sourceConfig = { ...this.config, rootDir: root.path };
+    const orchestrator = new ExtractionOrchestrator(root.path, sourceConfig, this.queries, root.pathPrefix);
+    const resolver = createResolver(root.path, this.queries, { pathPrefix: root.pathPrefix });
+
+    return this.indexMutex.withLock(async () => {
+      try {
+        this.fileLock.acquire();
+      } catch {
+        return { success: false, filesIndexed: 0, filesSkipped: 0, filesErrored: 0, nodesCreated: 0, edgesCreated: 0, errors: [{ message: 'Could not acquire file lock - another process may be indexing', severity: 'error' as const }], durationMs: 0 };
+      }
+      try {
+        if (options.force) {
+          this.queries.deleteByPathPrefix(root.pathPrefix);
+        }
+        const result = await orchestrator.indexAll(options.onProgress, options.signal, options.verbose);
+        if (result.success && result.filesIndexed > 0) {
+          const unresolvedRefs = this.queries.getUnresolvedReferencesByPathPrefix(root.pathPrefix);
+          options.onProgress?.({ phase: 'resolving', current: 0, total: unresolvedRefs.length });
+          resolver.resolveAndPersist(unresolvedRefs, (current, total) => {
+            options.onProgress?.({ phase: 'resolving', current, total });
+          });
+        }
+        this.queries.upsertSourceRoot({ ...root, indexedAt: Date.now() });
         return result;
       } finally {
         this.fileLock.release();
@@ -490,6 +551,68 @@ export class CodeGraph {
     });
   }
 
+  async syncSourceRoot(sourceRootPath: string, options: IndexOptions = {}): Promise<SyncResult> {
+    const root = this.resolveSourceRoot(sourceRootPath) ?? this.registerSourceRoot(sourceRootPath);
+    const sourceConfig = { ...this.config, rootDir: root.path };
+    const orchestrator = new ExtractionOrchestrator(root.path, sourceConfig, this.queries, root.pathPrefix);
+    const resolver = createResolver(root.path, this.queries, { pathPrefix: root.pathPrefix });
+
+    return this.indexMutex.withLock(async () => {
+      try {
+        this.fileLock.acquire();
+      } catch {
+        return { filesChecked: 0, filesAdded: 0, filesModified: 0, filesRemoved: 0, nodesUpdated: 0, durationMs: 0 };
+      }
+      try {
+        const result = await orchestrator.sync(options.onProgress);
+        if (result.filesAdded > 0 || result.filesModified > 0) {
+          const refs = result.changedFilePaths
+            ? this.queries.getUnresolvedReferencesByFiles(result.changedFilePaths)
+            : this.queries.getUnresolvedReferencesByPathPrefix(root.pathPrefix);
+          options.onProgress?.({ phase: 'resolving', current: 0, total: refs.length });
+          resolver.resolveAndPersist(refs, (current, total) => {
+            options.onProgress?.({ phase: 'resolving', current, total });
+          });
+        }
+        this.queries.upsertSourceRoot({ ...root, indexedAt: Date.now() });
+        return result;
+      } finally {
+        this.fileLock.release();
+      }
+    });
+  }
+
+  async syncAllSourceRoots(options: IndexOptions = {}): Promise<SyncResult> {
+    const roots = this.queries.getAllSourceRoots();
+    const total: SyncResult = {
+      filesChecked: 0,
+      filesAdded: 0,
+      filesModified: 0,
+      filesRemoved: 0,
+      nodesUpdated: 0,
+      durationMs: 0,
+      changedFilePaths: [],
+    };
+
+    for (const root of roots) {
+      const result = await this.syncSourceRoot(root.path, options);
+      total.filesChecked += result.filesChecked;
+      total.filesAdded += result.filesAdded;
+      total.filesModified += result.filesModified;
+      total.filesRemoved += result.filesRemoved;
+      total.nodesUpdated += result.nodesUpdated;
+      total.durationMs += result.durationMs;
+      if (result.changedFilePaths) {
+        total.changedFilePaths!.push(...result.changedFilePaths);
+      }
+    }
+
+    if (total.changedFilePaths?.length === 0) {
+      delete total.changedFilePaths;
+    }
+    return total;
+  }
+
   /**
    * Check if an indexing operation is currently in progress
    */
@@ -551,6 +674,24 @@ export class CodeGraph {
     return this.orchestrator.getChangedFiles();
   }
 
+  getChangedFilesForSourceRoot(sourceRootPath: string): { added: string[]; modified: string[]; removed: string[] } {
+    const root = this.resolveSourceRoot(sourceRootPath);
+    if (!root) return { added: [], modified: [], removed: [] };
+    const sourceConfig = { ...this.config, rootDir: root.path };
+    return new ExtractionOrchestrator(root.path, sourceConfig, this.queries, root.pathPrefix).getChangedFiles();
+  }
+
+  getChangedFilesForAllSourceRoots(): { added: string[]; modified: string[]; removed: string[] } {
+    const aggregate = { added: [] as string[], modified: [] as string[], removed: [] as string[] };
+    for (const root of this.queries.getAllSourceRoots()) {
+      const changes = this.getChangedFilesForSourceRoot(root.path);
+      aggregate.added.push(...changes.added);
+      aggregate.modified.push(...changes.modified);
+      aggregate.removed.push(...changes.removed);
+    }
+    return aggregate;
+  }
+
   /**
    * Extract nodes and edges from source code (without storing)
    */
@@ -597,6 +738,27 @@ export class CodeGraph {
    */
   reinitializeResolver(): void {
     this.resolver.initialize();
+  }
+
+  registerSourceRoot(sourceRootPath: string): SourceRoot {
+    const root = createSourceRoot(sourceRootPath);
+    const existing = this.queries.getSourceRootByPath(root.path);
+    const sourceRoot = existing ?? root;
+    this.queries.upsertSourceRoot({ ...sourceRoot, indexedAt: Date.now() });
+    return sourceRoot;
+  }
+
+  getSourceRoots(): SourceRoot[] {
+    return this.queries.getAllSourceRoots();
+  }
+
+  resolveSourceRoot(sourceRootPath: string): SourceRoot | null {
+    const resolved = path.resolve(sourceRootPath);
+    const exact = this.queries.getSourceRootByPath(resolved);
+    if (exact) return exact;
+    const roots = this.queries.getAllSourceRoots()
+      .sort((a, b) => b.path.length - a.path.length);
+    return roots.find((root) => resolved === root.path || resolved.startsWith(root.path + path.sep)) ?? null;
   }
 
   // ===========================================================================

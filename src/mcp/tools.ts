@@ -509,6 +509,13 @@ export class ToolHandler {
     const resolvedRoot = findNearestCodeGraphRoot(projectPath);
 
     if (!resolvedRoot) {
+      if (this.cg) {
+        const sourceRoot = this.cg.resolveSourceRoot(projectPath);
+        if (sourceRoot) {
+          this.projectCache.set(projectPath, this.cg);
+          return this.cg;
+        }
+      }
       throw new Error(`CodeGraph not initialized in ${projectPath}. Run 'codegraph init' in that project first.`);
     }
 
@@ -1256,6 +1263,7 @@ export class ToolHandler {
   private async handleStatus(args: Record<string, unknown>): Promise<ToolResult> {
     const cg = this.getCodeGraph(args.projectPath as string | undefined);
     const stats = cg.getStats();
+    const sourceRoots = cg.getSourceRoots();
 
     const lines: string[] = [
       '## CodeGraph Status',
@@ -1277,6 +1285,13 @@ export class ToolHandler {
         `**Backend:** ⚠ wasm (better-sqlite3 unavailable) — ` +
         `5-10x slower than native. Fix: ${WASM_FALLBACK_FIX_RECIPE}`
       );
+    }
+
+    if (sourceRoots.length > 0) {
+      lines.push('', '### Source Roots:');
+      for (const root of sourceRoots) {
+        lines.push(`- ${root.pathPrefix} ${root.path}`);
+      }
     }
 
     lines.push('', '### Nodes by Kind:');

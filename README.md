@@ -6,7 +6,7 @@
 
 **94% fewer tool calls · 77% faster exploration · 100% local**
 
-[![npm version](https://img.shields.io/npm/v/@colbymchenry/codegraph.svg)](https://www.npmjs.com/package/@colbymchenry/codegraph)
+[![npm version](https://img.shields.io/npm/v/@myersguo/codegraph.svg)](https://www.npmjs.com/package/@myersguo/codegraph)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node.js](https://img.shields.io/badge/Node.js-18+-green.svg)](https://nodejs.org/)
 
@@ -24,7 +24,7 @@
 ### Get Started
 
 ```bash
-npx @colbymchenry/codegraph
+npx @myersguo/codegraph
 ```
 
 <sub>Interactive installer auto-configures your agent(s) — Claude Code, Cursor, Codex CLI, opencode</sub>
@@ -150,7 +150,7 @@ CodeGraph detects web-framework routing files and emits `route` nodes linked by 
 ### 1. Run the Installer
 
 ```bash
-npx @colbymchenry/codegraph
+npx @myersguo/codegraph
 ```
 
 The installer will:
@@ -198,7 +198,7 @@ That's it — your agent will use CodeGraph tools automatically when a `.codegra
 
 **Install globally:**
 ```bash
-npm install -g @colbymchenry/codegraph
+npm install -g @myersguo/codegraph
 ```
 
 **Add to `~/.claude.json`:**
@@ -388,7 +388,7 @@ When running as an MCP server, CodeGraph exposes these tools to Claude Code:
 ## Library Usage
 
 ```typescript
-import CodeGraph from '@colbymchenry/codegraph';
+import CodeGraph from '@myersguo/codegraph';
 
 const cg = await CodeGraph.init('/path/to/project');
 // Or: const cg = await CodeGraph.open('/path/to/project');
@@ -502,6 +502,6 @@ MIT
 
 **Made for the Claude Code community**
 
-[Report Bug](https://github.com/colbymchenry/codegraph/issues) · [Request Feature](https://github.com/colbymchenry/codegraph/issues)
+[Report Bug](https://github.com/myersguo/codegraph/issues) · [Request Feature](https://github.com/myersguo/codegraph/issues)
 
 </div>

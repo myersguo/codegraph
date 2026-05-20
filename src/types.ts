@@ -214,6 +214,26 @@ export interface FileRecord {
   errors?: ExtractionError[];
 }
 
+/**
+ * A source directory indexed into a CodeGraph database.
+ */
+export interface SourceRoot {
+  /** Stable id used as the path namespace prefix in global indexes */
+  id: string;
+
+  /** Absolute source directory path */
+  path: string;
+
+  /** Human-readable name, usually the directory basename */
+  name: string;
+
+  /** Prefix applied to indexed file paths, empty for legacy single-root DBs */
+  pathPrefix: string;
+
+  /** When this source root was last registered/indexed */
+  indexedAt: number;
+}
+
 // =============================================================================
 // Extraction Types
 // =============================================================================

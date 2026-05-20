@@ -66,6 +66,17 @@ CREATE TABLE IF NOT EXISTS files (
     errors TEXT -- JSON array
 );
 
+-- Source roots indexed into this database. A traditional per-project
+-- CodeGraph DB has one root with an empty path prefix; a global DB can
+-- register multiple roots and namespace indexed paths by root id.
+CREATE TABLE IF NOT EXISTS source_roots (
+    id TEXT PRIMARY KEY,
+    path TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
+    path_prefix TEXT NOT NULL UNIQUE,
+    indexed_at INTEGER NOT NULL
+);
+
 -- Unresolved References: References that need resolution after full indexing
 CREATE TABLE IF NOT EXISTS unresolved_refs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -135,6 +146,7 @@ CREATE INDEX IF NOT EXISTS idx_edges_target_kind ON edges(target, kind);
 -- File indexes
 CREATE INDEX IF NOT EXISTS idx_files_language ON files(language);
 CREATE INDEX IF NOT EXISTS idx_files_modified_at ON files(modified_at);
+CREATE INDEX IF NOT EXISTS idx_source_roots_path ON source_roots(path);
 
 -- Unresolved refs indexes
 CREATE INDEX IF NOT EXISTS idx_unresolved_from_node ON unresolved_refs(from_node_id);
