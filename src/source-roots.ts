@@ -46,8 +46,12 @@ export function createSourceRootId(sourcePath: string): string {
   const resolved = path.resolve(sourcePath);
   const remoteUrl = getGitRemoteOrigin(resolved);
   const identity = remoteUrl ?? resolved;
-  const base = path.basename(resolved) || 'root';
-  const slug = base
+  // Use the repo name from the git URL as the readable base when available,
+  // so the same repo produces the same slug regardless of clone directory name.
+  const rawBase = remoteUrl
+    ? (remoteUrl.split('/').pop() || path.basename(resolved) || 'root')
+    : (path.basename(resolved) || 'root');
+  const slug = rawBase
     .toLowerCase()
     .replace(/[^a-z0-9._-]+/g, '-')
     .replace(/^-+|-+$/g, '') || 'root';
