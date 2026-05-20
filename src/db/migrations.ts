@@ -9,7 +9,7 @@ import { SqliteDatabase } from './sqlite-adapter';
 /**
  * Current schema version
  */
-export const CURRENT_SCHEMA_VERSION = 5;
+export const CURRENT_SCHEMA_VERSION = 6;
 
 /**
  * Migration definition
@@ -78,6 +78,16 @@ const migrations: Migration[] = [
           indexed_at INTEGER NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_source_roots_path ON source_roots(path);
+      `);
+    },
+  },
+  {
+    version: 6,
+    description: 'Add remote_url and commit_id columns to source_roots for git provenance tracking',
+    up: (db) => {
+      db.exec(`
+        ALTER TABLE source_roots ADD COLUMN remote_url TEXT;
+        ALTER TABLE source_roots ADD COLUMN commit_id TEXT;
       `);
     },
   },

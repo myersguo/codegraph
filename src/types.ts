@@ -230,6 +230,12 @@ export interface SourceRoot {
   /** Prefix applied to indexed file paths, empty for legacy single-root DBs */
   pathPrefix: string;
 
+  /** Normalized git remote origin URL, null for non-git directories */
+  remoteUrl: string | null;
+
+  /** HEAD commit hash at the time of indexing, null for non-git directories */
+  commitId: string | null;
+
   /** When this source root was last registered/indexed */
   indexedAt: number;
 }

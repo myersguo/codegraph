@@ -87,6 +87,8 @@ interface SourceRootRow {
   path: string;
   name: string;
   path_prefix: string;
+  remote_url: string | null;
+  commit_id: string | null;
   indexed_at: number;
 }
 
@@ -155,6 +157,8 @@ function rowToSourceRoot(row: SourceRootRow): SourceRoot {
     path: row.path,
     name: row.name,
     pathPrefix: row.path_prefix,
+    remoteUrl: row.remote_url,
+    commitId: row.commit_id,
     indexedAt: row.indexed_at,
   };
 }
@@ -1520,12 +1524,14 @@ export class QueryBuilder {
   upsertSourceRoot(root: SourceRoot): void {
     if (!this.stmts.upsertSourceRoot) {
       this.stmts.upsertSourceRoot = this.db.prepare(`
-        INSERT INTO source_roots (id, path, name, path_prefix, indexed_at)
-        VALUES (@id, @path, @name, @pathPrefix, @indexedAt)
+        INSERT INTO source_roots (id, path, name, path_prefix, remote_url, commit_id, indexed_at)
+        VALUES (@id, @path, @name, @pathPrefix, @remoteUrl, @commitId, @indexedAt)
         ON CONFLICT(id) DO UPDATE SET
           path = excluded.path,
           name = excluded.name,
           path_prefix = excluded.path_prefix,
+          remote_url = excluded.remote_url,
+          commit_id = excluded.commit_id,
           indexed_at = excluded.indexed_at
       `);
     }

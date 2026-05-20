@@ -74,6 +74,8 @@ CREATE TABLE IF NOT EXISTS source_roots (
     path TEXT NOT NULL UNIQUE,
     name TEXT NOT NULL,
     path_prefix TEXT NOT NULL UNIQUE,
+    remote_url TEXT,
+    commit_id TEXT,
     indexed_at INTEGER NOT NULL
 );
 

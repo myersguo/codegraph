@@ -33,6 +33,18 @@ function getGitRemoteOrigin(dir: string): string | null {
 }
 
 /**
+ * Return the HEAD commit hash for a directory, or null if the directory
+ * is not a git repo.
+ */
+function getGitHeadCommit(dir: string): string | null {
+  try {
+    return execFileSync('git', ['-C', dir, 'rev-parse', 'HEAD'], { encoding: 'utf-8' }).trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Create a filesystem-safe, stable source-root id. The basename keeps
  * paths readable in query output; the hash prevents collisions between
  * same-named repositories.
@@ -67,6 +79,8 @@ export function createSourceRoot(sourcePath: string, id?: string): SourceRoot {
     path: resolved,
     name: path.basename(resolved) || rootId,
     pathPrefix: `${rootId}/`,
+    remoteUrl: getGitRemoteOrigin(resolved),
+    commitId: getGitHeadCommit(resolved),
     indexedAt: Date.now(),
   };
 }
