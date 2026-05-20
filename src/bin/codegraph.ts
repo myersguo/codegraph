@@ -169,6 +169,11 @@ function resolveStorageRootFromCwd(): string | null {
   return resolveProjectPath(process.cwd());
 }
 
+function resolveStorageRootFromHome(): string | null {
+  const homeDir = os.homedir();
+  return isInitialized(homeDir) ? homeDir : null;
+}
+
 function resolveIndexTarget(pathArg?: string): { storagePath: string; sourcePath?: string } {
   if (!pathArg) {
     return { storagePath: resolveProjectPath() };
@@ -182,6 +187,11 @@ function resolveIndexTarget(pathArg?: string): { storagePath: string; sourcePath
   const cwdStorage = resolveStorageRootFromCwd();
   if (cwdStorage && isInitialized(cwdStorage)) {
     return { storagePath: cwdStorage, sourcePath: absoluteArg };
+  }
+
+  const homeStorage = resolveStorageRootFromHome();
+  if (homeStorage) {
+    return { storagePath: homeStorage, sourcePath: absoluteArg };
   }
 
   return { storagePath: resolveProjectPath(absoluteArg) };
