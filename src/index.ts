@@ -742,10 +742,16 @@ export class CodeGraph {
 
   registerSourceRoot(sourceRootPath: string): SourceRoot {
     const root = createSourceRoot(sourceRootPath);
-    const existing = this.queries.getSourceRootByPath(root.path);
-    const sourceRoot = existing ?? root;
-    this.queries.upsertSourceRoot({ ...sourceRoot, indexedAt: Date.now() });
-    return sourceRoot;
+    const existingById = this.queries.getSourceRootById(root.id);
+
+    if (existingById) {
+      // Same repo at a different path — update path to new location
+      this.queries.upsertSourceRoot({ ...root, id: existingById.id });
+      return { ...root, id: existingById.id };
+    }
+
+    this.queries.upsertSourceRoot(root);
+    return root;
   }
 
   getSourceRoots(): SourceRoot[] {

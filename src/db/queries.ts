@@ -200,6 +200,7 @@ export class QueryBuilder {
     getAllFilePaths?: SqliteStatement;
     getAllNodeNames?: SqliteStatement;
     upsertSourceRoot?: SqliteStatement;
+    deleteSourceRootById?: SqliteStatement;
     getSourceRootByPath?: SqliteStatement;
     getSourceRootById?: SqliteStatement;
     getAllSourceRoots?: SqliteStatement;
@@ -1521,8 +1522,8 @@ export class QueryBuilder {
       this.stmts.upsertSourceRoot = this.db.prepare(`
         INSERT INTO source_roots (id, path, name, path_prefix, indexed_at)
         VALUES (@id, @path, @name, @pathPrefix, @indexedAt)
-        ON CONFLICT(path) DO UPDATE SET
-          id = excluded.id,
+        ON CONFLICT(id) DO UPDATE SET
+          path = excluded.path,
           name = excluded.name,
           path_prefix = excluded.path_prefix,
           indexed_at = excluded.indexed_at
@@ -1530,6 +1531,13 @@ export class QueryBuilder {
     }
 
     this.stmts.upsertSourceRoot.run(root);
+  }
+
+  deleteSourceRootById(id: string): void {
+    if (!this.stmts.deleteSourceRootById) {
+      this.stmts.deleteSourceRootById = this.db.prepare('DELETE FROM source_roots WHERE id = ?');
+    }
+    this.stmts.deleteSourceRootById.run(id);
   }
 
   getSourceRootByPath(sourcePath: string): SourceRoot | null {
